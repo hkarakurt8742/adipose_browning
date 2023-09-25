@@ -1,0 +1,773 @@
+---
+title: "Alternative Splicing and Regulary Events in Browning"
+author: "Hamza Umut Karakurt"
+date: "3/25/2022"
+output:
+  html_notebook:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    fig_width: 12
+    fig_height: 12 
+---
+
+# Introduction
+
+## Aim
+
+Mainly, 2 types of adipocyte cell can be found in mammals; white and brown adipocytes. They originate from different stem cells and basically white adipocytes stores fat while brown adipocytes burns fat with their high mitochondrial activity. Normally, brown adipocytes cannot be found in adult humans but can be found in newborns, rodents and hibernating animals. On the other hand, decrease in temperature (and some certain chemicals) gives white adipocytes brownish characters and beige, white adipocytes with increased fat burning potential, adipocytes forms. This process is called *browning* and/or *thermogenesis*. 
+Uncoupling Protein-1 (UCP-1) is a marker for thermogenesis and with increase in its expression level, thermogenesis process is activated. 
+In this study, we aimed to use RNA-Seq data of Cold Beige, Warm Beige and Warm White adipocytes to identify alternative splicing and regulatory events that associated with thermogenesis.
+
+## Data Source and Experiments
+
+In this study, we used an RNA-Seq data which involves Cold Beige, Warm Beige, Warm White, Warm Brown and Cold Brown adipocytes. The article also uses ChIP-Seq data for integrative analysis of these 5 adipocyte types. 
+Researchers used NuTRAP mouse, a mouse that enables researcher to analyze epigenome and transcriptome at the same time. Experimental technique uses mRNAs via seperation/purification of ribosomes.  
+
+## Notebook Content
+
+This notebook includes analyses of RNA-Seq data of Cold Beige, Warm Beige and Warm White Adipocytes from the data set "GSE108077".
+
+# Pre-process of Data
+
+## Alignment of Raw Fastq Reads
+
+Analyses includes Alignment of raw RNA-Seq reads (in FASTQ format) using [STAR](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3530905/) aligner to Mouse Genome and annotation Version 39 from [Ensembl](https://www.ensembl.org/index.html), differential expression using [DESeq2](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-014-0550-8) , alternative splicing analysis using [ASPli](https://academic.oup.com/bioinformatics/article-abstract/37/17/2609/6156815?redirectedFrom=fulltext) and Reporter Regulatory Elements Analysis (RREA) (results are exported from Matlab 2021a).
+
+```{bash , eval = FALSE} 
+hisat2 -p 12 -x "hisat2_genome_index" -1 "FASTQ_File_1" -2 "FASTQ_File_1" -S "output.sam"
+
+samtools view -S -b "output.sam" > "output.bam"
+
+samtools sort -@ 12 -o "output__sorted.bam" "output.bam"
+
+samtools index -@ 12 "output_sorted.bam"
+```
+
+## Processing of Genomic Properties for ASPli
+
+```{r , eval = FALSE}
+library(ASpli)
+library(GenomicFeatures)
+library(biomaRt)
+
+genomeTxDb <- makeTxDbFromGFF("GRCm39.105.gtf" , format = "gtf" , organism = "Mus musculus" , taxonomyId = 10090)
+genes <- genes(genomeTxDb)
+gene_ids <- genes$gene_id
+
+ensembl <- useMart("ensembl", dataset="mmusculus_gene_ensembl")
+
+gs_heatdata <- getBM(attributes = c('external_gene_name','ensembl_gene_id'),filters = 'ensembl_gene_id',values = gene_ids,mart = ensembl)
+
+symbols <- as.data.frame(gs_heatdata$external_gene_name)
+rownames(symbols) <- gs_heatdata$ensembl_gene_id
+colnames(symbols) <- c("symbol")
+features <- binGenome(genomeTxDb , cores = 10)
+
+save(features , genomeTxDb , file = "MM39_features_ensembl.RData")
+```
+
+
+## Required packages For Notebook
+
+```{r  , message=FALSE}
+library(ASpli)
+library(GenomicFeatures)
+library(biomaRt)
+library(clusterProfiler)
+library(ggvenn)
+library(DESeq2)
+library(stringr)
+library(ggsci)
+library(RColorBrewer)
+library(expss)
+library(org.Mm.eg.db)
+library(reshape)
+library(gridExtra)
+library(knitr)
+library(mygene)
+```
+
+# Data Analysis
+
+## Features (Genes, Exons, Introns, Junctions) Count Matrices
+
+This section shows the preparation of count matrices using ASPli. Since ASPli also created gene counts matrix, an extra step using FeatureCounts did not included here.
+
+12 samples (4 Cold Beige, 3 Warm Beige and 5 Warm White) are used. BAM files are stored in a folder and for each condition merged bam files were generated using [Samtools](https://pubmed.ncbi.nlm.nih.gov/19505943/) in order to use in ASPli.
+
+*This section has "eval=FALSE" parameter and it will not run. The section takes about 2 hours (1 hour for feature generation and 1 hour for ASPli counts).*
+
+```{r , eval=FALSE}
+load("~/Documents/R/tjob_mm/MM39_features_ensembl.RData")
+
+BAMFiles <- list.files(path="/home/huk/Documents/R/tjob_mm/BAM_Files/STAR" , pattern = ".bam" , full.names = TRUE)
+
+targets <- data.frame(row.names = paste0('Sample',c(1:12)),
+                      bam = BAMFiles[seq(3,25,by=2)],
+                      temperature = c(rep("Cold",4),rep("Warm",8)),
+                      cell_type = c(rep("Beige",7) , rep("White",5)),
+                      stringsAsFactors = FALSE)
+
+mBAMs <- data.frame(bam = BAMFiles[c(1,27,29)],
+                    condition = c("Cold_Beige","Warm_Beige","Warm_White"))
+
+
+gbcounts <- gbCounts(features=features, targets=targets,
+                     minReadLength = 50, maxISize = 50000 , libType = "PE")
+
+
+asd <- jCounts(counts=gbcounts, features=features, minReadLength=50 , libType = "PE")
+```
+
+Design matrix includes temperature and cell type parameters. Formula uses only temperature for comparison. Biologically, temperature decreases and certain chemicals gives white adipocytes a brownish character and generates beige adipocytes. Due to white adipocytes can transform to beige adipocytes, another analysis for cell types did not applied.
+
+In this section bins (exons, introns and junctions) were analyzed.
+
+*This section has "eval=FALSE" parameter and it will not run. The section takes about 2 hours 
+
+```{r , eval=FALSE}
+######################### ASPLI ANALYSES ###########################
+
+form <- formula(~temperature)
+model.matrix(form,targets)
+
+gb <- gbDUreport(gbcounts, formula = form)
+
+jdur <- jDUreport(asd, formula = form)
+
+sr <- splicingReport(gb, jdur, counts=gbcounts)
+
+is <- integrateSignals(sr,asd , bin.fdr = 0.01)
+
+exportSplicingReports(sr , output.dir = "cbg_wbg_wwh_splice" , maxBinFDR = 0.01 , maxJunctionFDR = 0.01)
+
+exportIntegratedSignals(is,sr=sr,
+                        output.dir = "cbg_wbg_wwh_splice_integrated",
+                        counts=gbcounts,features=features,asd=asd,
+                        mergedBams = mBAMs , bforce = TRUE)
+```
+
+GeneSymbols of Ensembl IDs in order to use in conversion of Ensembl IDs to GeneSymbols.
+
+```{r , eval = FALSE}
+genomeTxDb <- makeTxDbFromGFF("GRCm39.105.gtf" , format = "gtf" , organism = "Mus musculus" , taxonomyId = 10090)
+genes <- genes(genomeTxDb)
+gene_ids <- genes$gene_id
+ensembl <- useMart("ensembl", dataset="mmusculus_gene_ensembl")
+gs_heatdata <- getBM(attributes = c('external_gene_name','ensembl_gene_id'),filters = 'ensembl_gene_id',values = gene_ids,mart = ensembl)
+```
+
+Data From Previous Analyses are saved in a file:
+
+```{r}
+load("cbg_wbg_wwh_ensembl.RData")
+```
+
+## Differential Expression Analysis
+
+DESeq2 package is used for differential expression analysis. Gene Count Matrix is extracted from ASPli object. Genes with total expression in all samples lower than 36 are removed from the data. Results are restored in a variable.
+
+```{r , echo=FALSE , message=FALSE}
+gene_counts <- countsg(gbcounts)
+gene_counts <- as.matrix(gene_counts[,c(8:19)])
+gene_counts <- gene_counts[rowSums(gene_counts) > 36,]
+gene_counts <- na.omit(gene_counts)
+colnames(gene_counts) <- c(paste("CBG" , c(1:4) , sep = "") , paste("WBG" , c(1:3) , sep = "") , paste("WWH" , c(1:5) , sep = ""))
+temperature <- factor(c(rep("Cold",4) , rep("Warm",3) , rep("Warm",5)))
+cell_type <- factor(c(rep("Beige",7) , rep("White",5)))
+dds_counts <- DESeqDataSetFromMatrix(gene_counts , DataFrame(temperature,cell_type) , ~temperature)
+dds_counts <- estimateSizeFactors(dds_counts)
+
+dds_counts <- DESeq(dds_counts)
+res_dds <- results(dds_counts)
+res_dds <- res_dds[order(res_dds$padj), ]
+resdata_dds <- merge(as.data.frame(res_dds), as.data.frame(counts(dds_counts, normalized=TRUE)), by="row.names", sort=FALSE)
+```
+
+Genes and Adjusted P-Values are stored in in "gene_pval_rep" variable for using in Reporter Regulatory Elements Analysis (RREA) in Matlab2020a via in-house scripts. Ensembl Gene IDs are converted to GeneSymbols using *vlookup* function from [expss](https://cran.r-project.org/web/packages/expss/index.html) package.
+
+```{r}
+gene_pval_rep <- as.data.frame(cbind(as.character(resdata_dds$Row.names) , as.numeric(resdata_dds$padj)))
+gene_pval_rep[,1] <- as.character(vlookup(gene_pval_rep[,1] , dict = gs_heatdata , result_column = 1 , lookup_column = 2))
+colnames(gene_pval_rep) <- c("Symbol" , "P_Val")
+gene_pval_rep <- gene_pval_rep %>% group_by(Symbol) %>% summarise(P=min(P_Val))
+gene_pval_rep <- as.data.frame(gene_pval_rep)
+tf_gene_network <- read.table("TF-Gene.txt" , header = F , sep = "\t")
+non_tfs <- unique(tf_gene_network[,2])
+rownames(gene_pval_rep) <- gene_pval_rep$Symbol
+gene_pval_rep <- na.omit(gene_pval_rep)
+write.table(gene_pval_rep , file = "symbol_padjs.txt" , sep = " \t" , row.names = F , col.names = F , quote = F)
+```
+
+Genes with adjusted p-values lower than 0.01 and absolute Log2Fold Change Value higher than 1 are considered as *significantly changed genes*. Differentially expressed genes are stored in "gene_de" variable.
+
+## Enrichment Analysis of Differentially Expressed Genes
+
+Enrichment analysis using GeneOntology Biological Process (BP), Molecular Function (MF) and Cellular Component (CC) is applied to significantly changed genes using [clusterProfiler](https://www.cell.com/the-innovation/fulltext/S2666-6758(21)00066-7?_returnURL=https%3A%2F%2Flinkinghub.elsevier.com%2Fretrieve%2Fpii%2FS2666675821000667%3Fshowall%3Dtrue) package.
+
+
+```{r}
+gene_de <- as.data.frame(cbind(as.numeric(resdata_dds$log2FoldChange) , as.numeric(resdata_dds$padj)))
+colnames(gene_de) <- c("log2FC" , "p_adj")
+rownames(gene_de) <- resdata_dds$Row.names
+gene_de <- gene_de[gene_de$p_adj < 0.01,]
+gene_de <- gene_de[(abs(gene_de$log2FC) > 1.5),]
+
+gene_enrich_up <- enrichGO(rownames(gene_de)[gene_de$log2FC > 0] , OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL" , ont = "all")
+gene_enrich_down <- enrichGO(rownames(gene_de)[gene_de$log2FC < 0] , OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL" , ont = "all")
+```
+
+### Dotplots of DE Genes. {.tabset}
+
+Plots correspond to BP, CC and MF terms of GeneOntology respectively (If there is any term enriched)
+
+#### Upregulated
+
+
+```{r , fig.cap= "Enrichment Results of Differentially Expressed Genes (Upregulated)"}
+dotplot(gene_enrich_up, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+```
+
+#### Downregulated
+
+```{r , fig.cap= "Enrichment Results of Differentially Expressed Genes (Downregulated)"}
+dotplot(gene_enrich_down, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+```
+
+
+## Differential AS Analysis
+
+ASPli package has edgeR package for significancy analyses. Using built-in functions of libraries, differential alternative splicing (AS) events are identified significantly.
+Since there are different types of alternative splicing events and ASPli can identify numerous of events (including Novel AS Events and Unidentified AS Events), here we focused 4 main classes of alternative splicing events. Exon Skipping (ES), Intron Retention (IR), Alternative 3' Splicing Site (Alt3ss) and Alternative 5' Splicing Site (Alt5ss)
+
+Differential Signals from all detected AS events. IR, ES, Alt3ss and Alt5ss are chosen.
+
+```{r}
+signals_all <- as.data.frame(is@signals)
+signal_types <- as.data.frame(cbind(signals_all$locus , signals_all$bin.event))
+signal_types[,1] <- as.character(vlookup(signal_types[,1] , dict = gs_heatdata , result_column = 1 , lookup_column = 2))
+write.table(signal_types , file = "as_types.txt" , row.names = F , col.names = F , quote = F , sep = "\t")
+
+signals <- signals_all[signals_all$bin.event == "IR" | signals_all$bin.event == "ES" | signals_all$bin.event == "Alt5ss" | signals_all$bin.event == "Alt3ss",]
+es_signals <- signals[signals$bin.event == "ES",]
+ir_signals <- signals[signals$bin.event == "IR",]
+ir_signals <- ir_signals[ir_signals$feature == "I",]
+alt3_signals <- signals[signals$bin.event == "Alt3ss",]
+alt5_signals <- signals[signals$bin.event == "Alt5ss",]
+
+
+write.table(signals , file = "AS_Events.txt" , row.names = T , col.names = T , quote = F , sep = "\t" , dec = ",")
+```
+
+1294 significant AS events are identified via ASPli analyses (326 Unique Genes). 
+Venn Scheme to identify if a gene have multiple AS events.
+Number of AS Events in Each Class
+
+```{r  , fig.cap= "Venn Scheme of Number of Alternative Splicing Events in 4 Classes"}
+ggvenn(list(ES = es_signals$locus , Introns = ir_signals$locus , Alt3SS = alt3_signals$locus , Alt5SS = alt5_signals$locus) , fill_alpha = 0.3 , text_size = 3)
+```
+
+Percentage of 4 Selected AS Events in all AS Events. For the selected 4 classes, the number of AS events are 460.
+
+```{r , fig.cap= "Percentage of Each Class of AS Events"}
+number_of_as_in_each_class = data.frame(AS_Class = c("ES" , "IR" ,"Alt3ss" , "Alt5ss") ,
+                                        Percentage = c((nrow(es_signals) / nrow(signals) * 100) , (nrow(ir_signals) / nrow(signals) * 100) , (nrow(alt3_signals) / nrow(signals) * 100) , (nrow(alt5_signals) / nrow(signals) * 100)))
+
+ggplot(data=number_of_as_in_each_class, aes(x=AS_Class, y=Percentage , fill = AS_Class)) + geom_bar(stat="identity") + scale_fill_aaas() + theme_bw() + geom_text(aes(label=round(Percentage,digits = 2)), vjust=1.6, color="white",position = position_dodge(0.9), size=3.5)
+```
+
+### Enrichment Analysis of Genes with Significant AS Events.
+
+For the class of AS Events (ES, IR, Alt3ss and Alt5ss) Ensembl Gene IDs directly used for enrichment analysis and results are plotted as dotplots (if there is significantly enriched terms.)
+
+```{r}
+es_enrich_up <- enrichGO(es_signals$locus[es_signals$b.logfc > 0] , OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL" , ont = "all")
+es_enrich_down <- enrichGO(es_signals$locus[es_signals$b.logfc < 0] , OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL" , ont = "all")
+
+ir_enrich_up <- enrichGO(ir_signals$locus[ir_signals$b.logfc > 0] , OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL" , ont = "all")
+ir_enrich_down <- enrichGO(ir_signals$locus[ir_signals$b.logfc < 0] , OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL" , ont = "all")
+```
+
+
+### Dotplots of Upregulated and Downregulated with differential AS events. {.tabset}
+
+Plots correspond to BP, CC and MF terms of GeneOntology respectively (If there is any term enriched)
+
+#### Upregulated
+
+```{r , fig.cap = "Enrichment Analysis Results of Genes with Exon Skipping Events (Upregulated)"}
+dotplot(es_enrich_up, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+```
+
+#### Downregulated
+
+```{r , fig.cap = "Enrichment Analysis Results of Genes with Exon Skipping Events (GeneOntology Cellular Component) (Left: Upregulated with Heat , Right: Downregulated with Heat)"}
+dotplot(es_enrich_down, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+```
+
+### Dotplots of genes with differential IR events. {.tabset}
+
+Plots correspond to BP, CC and MF terms of GeneOntology respectively (If there is any term enriched)
+
+#### Upregulated
+
+```{r , fig.cap = "Enrichment Analysis Results of Genes with Intron Retention Events (Upregulated)"}
+dotplot(ir_enrich_up, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+```
+
+#### Downregulated
+
+```{r , fig.cap = "Enrichment Analysis Results of Genes with Intron Retention Events (Downregulated)"}
+dotplot(ir_enrich_down, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+```
+
+
+Alternative 3' Splice Site and Alternative 5' Splice Site Events do not have any enriched significant events. Exon Skipping events only have significantly enriched terms in Molecular Function category. This result suggests that genes with significant AS events may related to actin binding and diphosphatase activity. On the other hand enrichment analysis results of genes with significant IR events indicated that some proportions of introns are transcribed in mRNAs and  alterations based on temperature changes the intron-transcription profile in extracellular structure associated genes.
+
+## Heatmap of Significant ES and IR Events
+
+Count matrices of Exons and Introns are extracted from ASPli object. For both of the matrices, features with total count lower than 36 across samples are removed.
+Matrices are stored (only stored) in DESeq Objects for easier manipulation
+
+```{r , message=FALSE}
+##### EXON COUNTS #####
+BinCounts <- countsb(gbcounts)
+exons <- BinCounts[BinCounts$feature == "E",]
+exon_matrix <- as.matrix(exons[,c(10:21)])
+exon_matrix <- exon_matrix[rowSums(exon_matrix) > 36,]
+sub <- apply(exon_matrix, 1, function(row) all(row !=0 ))
+exon_matrix <- exon_matrix[sub,]
+exon_matrix <- na.omit(exon_matrix)
+colnames(exon_matrix) <- c(paste("CBG" , c(1:4) , sep = "") , paste("WBG" , c(1:3) , sep = "") , paste("WWH" , c(1:5) , sep = ""))
+
+##### INTRON COUNTS #####
+BinCounts <- countsb(gbcounts)
+introns <- BinCounts[BinCounts$feature == "I",]
+intron_matrix <- as.matrix(introns[,c(10:21)])
+intron_matrix <- intron_matrix[rowSums(intron_matrix) > 36,]
+sub <- apply(intron_matrix, 1, function(row) all(row !=0 ))
+intron_matrix <- intron_matrix[sub,]
+intron_matrix <- na.omit(intron_matrix)
+colnames(intron_matrix) <- c(paste("CBG" , c(1:4) , sep = "") , paste("WBG" , c(1:3) , sep = "") , paste("WWH" , c(1:5) , sep = ""))
+
+condition <- c(paste("CBG" , c(1:4) , sep = "") , paste("WBG" , c(1:3) , sep = "") , paste("WWH" , c(1:5) , sep = ""))
+```
+
+
+### Percentages of features.
+
+```{r}
+a <- nrow(intron_matrix) / (nrow(intron_matrix) + nrow(exon_matrix)) * 100
+b <- nrow(exon_matrix) / (nrow(intron_matrix) + nrow(exon_matrix)) * 100
+c <- nrow(intron_matrix) / sum(features@bins$feature == "I") * 100
+d <- nrow(exon_matrix) / sum(features@bins$feature == "E") * 100
+e <- sum(features@bins$feature == "I") / sum(features@bins$feature == "E") * 100
+print(paste("The Ratio of Introns: " , round(a , digits = 2)))
+print(paste("The Ratio of Exons: " , round(b , digits = 2)))
+print(paste("The Ratio of Expressed Introns to All Introns: " , round(c , digits = 2)))
+print(paste("The Ratio of Expressed Exons to All Exons: " , round(d , digits = 2)))
+print(paste("The Ratio of All Introns to Exons in Total Features: " , round(e , digits = 2)))
+rm(a,b,c,d,e)
+```
+
+### Density plot of exon and intron counts. 
+
+```{r , fig.cap = "Density Plot of Exon and Intron Counts"}
+d_ex <- density(log2(exon_matrix) + 1)
+d_in <- density(log2(intron_matrix) + 1)
+
+plot(d_ex, lwd = 2, col = "red",main = "Density of Exon and Intron Counts (Log2) (Red = Exons , Blue = Introns)", 
+     xlab = "Log2 Normalized Counts",xlim = c(0 , 15), ylim = c(0 , 0.3))
+polygon(d_ex, col = rgb(1, 0, 0, alpha = 0.5))
+
+lines(d_in, col = "blue", lwd = 2)
+polygon(d_in, col = rgb(0, 0, 1, alpha = 0.5))
+```
+
+### Heatmaps of Alternatively Spliced Introns and Exons.
+
+Bin Counts of Alternatively Spliced Introns and Exons extracted from BinCounts object. 
+All exon counts with their gene symbols are plotted while the most variant introns (equal to number of exons) are plotted due to have better visualization. Counts are shown in Supplementary File.
+
+Associated Exon and Intron counts of genes 
+
+```{r}
+genes_with_es <- unique(es_signals$bin)
+genes_with_ir <- unique(ir_signals$bin)
+
+#match_ex <- grep(paste(genes_with_es,collapse = "|") , rownames(BinCounts))
+#match_ir <- grep(paste(genes_with_ir,collapse = "|") , rownames(BinCounts))
+
+selected_ex <- BinCounts[genes_with_es,]
+selected_ex <- selected_ex[,c(10:21)]
+selected_ex <- na.omit(selected_ex)
+selected_ex <- as.matrix(selected_ex[rowSums(selected_ex) > 24,])
+selected_ir <- BinCounts[genes_with_ir,]
+selected_ir <- selected_ir[,c(10:21)]
+selected_ir <- na.omit(selected_ir)
+selected_ir <- as.matrix(selected_ir[rowSums(selected_ir) > 24,])
+
+colnames(selected_ex) <- c(paste("CBG" , c(1:4) , sep = "") , paste("WBG" , c(1:3) , sep = "") , paste("WWH" , c(1:5) , sep = ""))
+colnames(selected_ir) <- c(paste("CBG" , c(1:4) , sep = "") , paste("WBG" , c(1:3) , sep = "") , paste("WWH" , c(1:5) , sep = ""))
+```
+
+```{r , message=FALSE}
+selected_ex <- log2(selected_ex + 1)
+selected_ir <- log2(selected_ir + 1)
+
+df <- melt(selected_ex)
+colnames(df) <- c("Exon", "Sample", "value")
+selected_ex_genes <- str_split_fixed(df$Exon , ":" , 2)
+selected_ex_genes[,1] <- vlookup(selected_ex_genes[,1] ,dict = gs_heatdata , result_column = 1 , lookup_column = 2)
+df$Exon <- paste(selected_ex_genes[,1] , selected_ex_genes[,2] , sep = ":")
+
+
+var_intron <- apply(selected_ir, 1, var)
+selected_intron <- names(sort(var_intron, decreasing=TRUE))[1:nrow(selected_ex)]
+
+df2 <- melt(selected_ir[selected_intron,])
+colnames(df2) <- c("Intron", "Sample", "value")
+selected_ir_genes <- str_split_fixed(df2$Intron , ":" , 2)
+selected_ir_genes[,1] <- vlookup(selected_ir_genes[,1] ,dict = gs_heatdata , result_column = 1 , lookup_column = 2)
+df2$Intron <- paste(selected_ir_genes[,1] , selected_ir_genes[,2] , sep = ":")
+```
+
+```{r , fig.height=7, fig.width=10 , fig.cap= "Heatmap Plots of Counts of Alternatively Spliced Exons (Left) and Introns (Right)"}
+a <- ggplot(df, aes(x = Sample, y = Exon, fill = value)) + geom_tile(color = "black")  + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1) , axis.text.y = element_text(size = 10)) + scale_fill_distiller(palette = "BrBG") +
+  guides(fill = guide_colourbar(barwidth = 0.5,
+                                barheight = 20))
+
+b <- ggplot(df2, aes(x = Sample, y = Intron, fill = value)) + geom_tile(color = "black")  + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1) , axis.text.y = element_text(size = 10) ) + scale_fill_distiller(palette = "BrBG") + 
+  guides(fill = guide_colourbar(barwidth = 0.5,
+                                barheight = 20))
+
+grid.arrange(a, b, ncol=2)
+```
+
+
+## Correlation Based Analyses
+
+Ucp-1 (ENSMUSG00000031710) is a well-known marker of thermogenesis. As known, the fat-burning capacity increases of an adipocyte is increases with Ucp-1 expression. This protein is considered as a potential drug target for obesity patients.
+
+The correlation of exon usage and Ucp-1 expression is a potentially useful analyses to show the alterations in exon usage in termogenesis process.
+exons with correlation (R value) is higher than 0.9 or lower than -0.9 are considered as *UCP1-correlated Exons and Introns*.
+
+Correlation of Introns
+
+```{r}
+ucp1_exp <- as.numeric(counts(dds_counts, normalized=TRUE)["ENSMUSG00000031710",])
+correlations <- c()
+normalized_intron <- log2(intron_matrix +1)
+for (i in 1:nrow(normalized_intron)) {
+  correlations[i] <- cor(x = normalized_intron[i,], y = ucp1_exp , method = "spearman")
+}
+
+high_corr_introns <- normalized_intron[(correlations > 0.9 | correlations < -0.9),]
+high_corr_introns <- as.data.frame(rownames(normalized_intron[(correlations > 0.9 | correlations < -0.9),]))
+high_corr_introns <- as.data.frame(str_split_fixed(high_corr_introns[,1], ":", 2))
+
+go_res_corr_intron <- enrichGO(as.character(high_corr_introns[,1]), OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL" , ont = "all")
+```
+
+454 introns out of 47804 were identified as termogenesis-correlated introns. These introns are belong to 350 genes. To identify the common functions of these genes, enrichment analysis (using *clusterProfiler* library) were applied. GeneOntology "*Biological Process, Cellular Component and Molecular Function*" databases were used in analyses.
+
+Correlation of Exons
+
+```{r}
+correlations <- c()
+normalized_exons <- log2(exon_matrix + 1)
+for (i in 1:nrow(normalized_exons)) {
+  correlations[i] <- cor(x = normalized_exons[i,], y = ucp1_exp , method = "spearman")
+}
+
+high_corr_exons <- normalized_exons[(correlations > 0.9 | correlations < -0.9),]
+high_corr_exons <- as.data.frame(rownames(normalized_exons[(correlations > 0.9 | correlations < -0.9),]))
+high_corr_exons <- as.data.frame(str_split_fixed(high_corr_exons[,1], ":", 2)) # Exon names are in the structure as "Gene:ExonIndex". They were splitted for the enrichment analysis
+
+go_res_corr_exon <- enrichGO(as.character(high_corr_exons[,1]), OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL" , ont = "all")
+```
+
+15457 exons out of 148425 were identified as thermogenesis-correlated exons. These exons are belong to 4658 genes. To identify the common functions of these genes, enrichment analysis (using *clusterProfiler* library) were applied. GeneOntology "*Biological Process, Cellular Component and Molecular Function*" databases were used in analyses.
+
+highly correlated introns and exons identified. For unique genes in correlated exons and introns, enrichment analysis applied as well.
+
+Enrichment analysis for genes associated with unique exons and introns in variant features lists.
+
+### Dotplots of Enrichment Analysis Results of Ucp1-Correlated Exons and Introns. {.tabset}
+
+Plots correspond to BP, CC and MF terms of GeneOntology respectively (If there is any term enriched)
+
+#### Exons
+
+```{r , fig.cap = "Enrichment Analysis Results of Ucp1-Correlated Exons"}
+dotplot(go_res_corr_exon, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+```
+
+#### Introns
+
+```{r , fig.cap = "Enrichment Analysis Results of Ucp1-Correlated Introns"}
+dotplot(go_res_corr_intron, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+```
+
+
+# Comparison with DE, RREA and All AS Events.
+
+RREA uses gene p-values to calculate p-values for regulators. Basically it is an implementation of [Reporter Metabolite Analysis](https://www.pnas.org/doi/10.1073/pnas.0406811102) and [Reporter Pathway Analysis](https://www.nature.com/articles/srep14563).
+As mentioned, analysis calculated P-Values for regulators (transcription factors) but differential expression analysis also gives p-values for these regulators since they also expressed as mRNAs. The difference between two analyses is that, differential expression calculates the change of gene expression between conditions while RREA calculates the function/activity changes.
+So we hypothesized that transcription factors that are significantly altered in RREA but not signficantly changed in the context of expression may have any change in post-translational modifications that alters the function/activity. 
+
+First step of this analysis is to identify transcription factors that signficantly altered in RREA (p-value < 0.05) but did not signficiantly changed in differential expression (p-adjusted > 0.01).
+
+## Potentially Post-Translationally Modificated Transcription Factors
+
+```{r}
+rra_results <- read.table("reporters.txt" , header = T)
+rra_results$ensembls <- as.character(vlookup(rra_results$TF , dict = gs_heatdata , result_column = 2 , lookup_column = 1))
+rra_results <- na.omit(rra_results)
+rownames(rra_results) <- rra_results$ensembls
+
+rra_sig <- rra_results[rra_results$P.Value < 0.05,]
+rra_sig <- rra_sig[rra_sig$Edge > 4,]
+rra_sig <- rra_sig[rra_sig$Edge < 400,]
+```
+
+
+```{r}
+rra_go <- enrichGO(rownames(rra_sig), OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL" , ont = "all")
+
+rra_kegg <- enrichKEGG(bitr(rownames(rra_sig) , fromType = "ENSEMBL" , toType = "ENTREZID" , OrgDb="org.Mm.eg.db")[,2] , organism = "mmu")
+```
+
+### Dotplots of Reporter Regulators. {.tabset}
+
+Plots correspond to BP, CC and MF terms of GeneOntology respectively (If there is any term enriched)
+
+#### GeneOntology
+
+```{r}
+dotplot(rra_go, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+```
+
+#### KEGG
+
+```{r}
+dotplot(rra_kegg)
+```
+
+
+
+```{r}
+gene_pval_results <- as.data.frame(resdata_dds$padj)
+rownames(gene_pval_results) <- resdata_dds$Row.names
+rra_results$in_de_genes <- rra_results$ensembls %in% rownames(gene_de)
+
+rra_results$Pval_DE <- as.numeric(gene_pval_results[rra_results$ensembls,])
+rra_results$significant_in_RPA <- rra_results$P.Value < 0.05
+rra_results$significant_in_DE <- rra_results$in_de_genes == TRUE
+
+possible_post_modification <- rra_results[(rra_results$significant_in_RPA == TRUE) & (rra_results$significant_in_DE == FALSE),]
+possible_post_modification <- na.omit(possible_post_modification)
+possible_post_modification <- possible_post_modification[possible_post_modification$Edge > 4,]
+possible_post_modification <- possible_post_modification[possible_post_modification$Edge < 400,]
+```
+
+
+This analysis identified 29 transcription factors (Genes with number of edges lower than 4 and higher than 400 are removed) as post-transcriptionally modificated potential regulators. 
+
+```{r}
+rra_pm_go <- enrichGO(rownames(possible_post_modification), OrgDb = "org.Mm.eg.db", keyType = "ENSEMBL" , ont = "all")
+rra_pm_kegg <- enrichKEGG(bitr(rownames(possible_post_modification) , fromType = "ENSEMBL" , toType = "ENTREZID" , OrgDb = "org.Mm.eg.db")[,2] , organism = "mmu")
+```
+
+
+### Dotplots of Regulators with Potential Post-translational Modification. {.tabset}
+
+Plots correspond to BP, CC and MF terms of GeneOntology respectively (If there is any term enriched)
+
+#### GeneOntology
+
+```{r}
+dotplot(rra_pm_go, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+```
+
+#### KEGG
+
+```{r}
+if (nrow(rra_pm_kegg) > 0) {
+  dotplot(rra_pm_kegg)
+}
+```
+
+
+## Combination of Alternative Splicing Events and Post-Translationally Modificated Transcription Factors
+
+```{r}
+all_as <- as.data.frame(cbind(signals$locus,signals$bin.event))
+possible_post_modification$in_as_signal <- possible_post_modification$ensembls %in% all_as$V1
+
+target_regs_with_as <- possible_post_modification[possible_post_modification$in_as_signal == TRUE,]
+```
+
+This Analyses showed that Usf2, upstream transcription factor 2, have a differential intron retention event and also a reporter regulator while it is not differentially expressed. Potentially, statistically significant expression of this particular intron region may affect the activity of Usf2 but does not effect the expression.
+
+In literature, [a prior study](https://pubmed.ncbi.nlm.nih.gov/12611894/) that Usf2 represses the induction of Carnitine Palmitoyltransferase I Beta, which is the first step of carnitine palmitoyltransferase system and generating ATP from fat in mitochondria. 
+Also [a previous study](https://www.nature.com/articles/s41467-021-25674-5) indicated that CLOCK, regulates ABCA1 expression using an indirect mechanism involving the transcription factor USF2. ABCA1 protein mediates the secretion of free cholesterol into apolipoprotein A-1 to form high-density lipoprotein, thereby playing a critical role in cholesterol homeostasis.
+Interestingly, [a study](https://www.sciencedirect.com/science/article/pii/S2213231720309551) that shows a possible role of Usf2 as a tumor supressor also identified its novel role for mitochondrial function and energy homeostasis thereby linking USF2 to conditions such as insulin resistance, type-2
+diabetes mellitus, and the metabolic syndrome.
+
+```{r}
+Usf2_bin_counts <- log2(as.matrix(countsb(gbcounts)[grep("ENSMUSG00000058239",x = rownames(BinCounts)),][,c(10:21)]) + 1)
+colnames(Usf2_bin_counts) <- c(paste("CBG" , c(1:4) , sep = "") , paste("WBG" , c(1:3) , sep = "") , paste("WWH" , c(1:5) , sep = ""))
+
+df3 <- melt(Usf2_bin_counts)
+colnames(df3) <- c("Bin", "Sample", "value")
+selected_usf2_genes <- str_split_fixed(df3$Bin , ":" , 2)
+selected_usf2_genes[,1] <- vlookup(selected_usf2_genes[,1] ,dict = gs_heatdata , result_column = 1 , lookup_column = 2)
+df3$Bin <- paste(selected_usf2_genes[,1] , selected_usf2_genes[,2] , sep = ":")
+
+
+ggplot(df3, aes(x = Sample, y = Bin, fill = value)) + geom_tile(color = "black")  + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_distiller(palette = "BrBG") + 
+  guides(fill = guide_colourbar(barwidth = 0.5,
+                                barheight = 20))
+```
+
+
+The IR Event is shown in Figure below
+
+![Usf2 IR Event.](7_30654619_30654714_gene.png)
+
+The Usf2 and Its Connected Differentially Expressed Genes are shown in Network Figure below
+
+![Usf2 and Its Connected Differentially Expressed Genes.](usf2_net.png)
+
+```{r}
+usf2_connected_de_genes <- read.table("usf2_network.txt" , header = F)
+```
+
+
+```{r , message=FALSE}
+usf2_associated_genes <- queryMany(as.character(usf2_connected_de_genes[,1]) , scopes = "symbol", species = "mouse")
+usf2_associated_genes <- as.data.frame(cbind(usf2_associated_genes@listData$query,usf2_associated_genes@listData$name))
+```
+
+```{r , echo=TRUE}
+kable(usf2_associated_genes)
+```
+
+```{r}
+usf_associated_go <- enrichGO(as.character(usf2_connected_de_genes[,1]), OrgDb = "org.Mm.eg.db", keyType = "SYMBOL" , ont = "all")
+```
+
+
+### Dotplots of Differentially Expressed and Connected to Usf2 Genes. {.tabset}
+
+Plots correspond to BP, CC and MF terms of GeneOntology respectively (If there is any term enriched)
+
+#### GeneOntology
+
+```{r}
+dotplot(usf_associated_go, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+```
+
+```{r,message=FALSE}
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Differentially_Expressed_Genes(Upregulated).png")
+dotplot(gene_enrich_up, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+dev.off()
+
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Differentially_Expressed_Genes(Downregulated).png")
+dotplot(gene_enrich_down, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+dev.off()
+
+png(width = 1280 , height = 720 , file= "figures/Venn_Scheme_of_AS_Events.png")
+ggvenn(list(ES = es_signals$locus , Introns = ir_signals$locus , Alt3SS = alt3_signals$locus , Alt5SS = alt5_signals$locus) , fill_alpha = 0.3 , text_size = 3)
+dev.off()
+
+png(width = 1280 , height = 720 , file= "figures/Distribution_of_AS_Events.png")
+ggplot(data=number_of_as_in_each_class, aes(x=AS_Class, y=Percentage , fill = AS_Class)) + geom_bar(stat="identity") + scale_fill_aaas() + 
+  theme_bw() + 
+  geom_text(aes(label=round(Percentage,digits = 2)), vjust=1.6, color="white",position = position_dodge(0.9), size=3.5)
+dev.off()
+
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Differential_Exon_Skipping_Events(Upregulated).png")
+dotplot(es_enrich_up, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+dev.off()
+
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Differential_Exon_Skipping_Events(Downregulated).png")
+dotplot(es_enrich_down, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+dev.off()
+
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Differential_Intron_Retention_Events(Upregulated).png")
+dotplot(ir_enrich_up, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+dev.off()
+
+
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Differential_Intron_Retention_Events(Downregulated).png")
+dotplot(ir_enrich_down, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+dev.off()
+
+png(width = 1280 , height = 720 , file= "figures/Density_Plot_of_Exon_and_Intron_Counts.png")
+plot(d_ex, lwd = 2, col = "red",main = "Density of Exon and Intron Counts (Log2) (Red = Exons , Blue = Introns)", 
+     xlab = "Log2 Normalized Counts",xlim = c(0 , 15), ylim = c(0 , 0.3))
+polygon(d_ex, col = rgb(1, 0, 0, alpha = 0.5))
+lines(d_in, col = "blue", lwd = 2)
+polygon(d_in, col = rgb(0, 0, 1, alpha = 0.5))
+dev.off()
+
+png(width = 1280 , height = 720 , file= "figures/Heatmap_of_Exons_and_Introns_with_AS_Events.png")
+a <- ggplot(df, aes(x = Sample, y = Exon, fill = value)) + geom_tile(color = "black")  + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_distiller(palette = "BrBG") +
+  guides(fill = guide_colourbar(barwidth = 0.5,
+                                barheight = 20))
+b <- ggplot(df2, aes(x = Sample, y = Intron, fill = value)) + geom_tile(color = "black")  + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_distiller(palette = "BrBG") + 
+  guides(fill = guide_colourbar(barwidth = 0.5,
+                                barheight = 20))
+grid.arrange(a, b, ncol=2)
+dev.off()
+
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Ucp1_Correlated_Exons.png")
+dotplot(go_res_corr_exon, title = "a) Ucp1 Correlated Exons" , split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+dev.off()
+
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Ucp1_Correlated_Introns.png")
+dotplot(go_res_corr_intron, title = "b) Ucp1 Correlated Introns" , split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+dev.off()
+
+
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Reporter_Regulators (GO).png")
+dotplot(rra_go, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+dev.off()
+
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Reporter_Regulators (KEGG).png")
+dotplot(rra_kegg)
+dev.off()
+
+
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Potential_PM_Reporters (GO).png")
+dotplot(rra_pm_go, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+dev.off()
+
+
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Potential_PM_Reporters (KEGG).png")
+dotplot(rra_pm_kegg)
+dev.off()
+
+
+
+png(width = 1280 , height = 720 , file= "figures/Heatmap_of_Usf2_Exons_and_Introns.png")
+ggplot(df3, aes(x = Sample, y = Bin, fill = value)) + geom_tile(color = "black")  + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_distiller(palette = "BrBG") + 
+  guides(fill = guide_colourbar(barwidth = 0.5,
+                                barheight = 20))
+dev.off()
+
+
+png(width = 1280 , height = 720 , file= "figures/Enrichment_Results_of_Usf2_Connected_DE_Genes.png")
+dotplot(usf_associated_go, split="ONTOLOGY" , showCategory = 7 , label_format = 70) + facet_grid(ONTOLOGY~., scale="free")
+dev.off()
+```
+
